@@ -1,26 +1,78 @@
 @import "tailwindcss";
 
+/* LaunchDarkly Brand Tokens — 2026 Brand Library (dark mode default) */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --ld-white:   #ffffff;
+  --ld-gray-01: #f8f8f8;
+  --ld-gray-02: #d1d6d9;
+  --ld-gray-03: #a7a9ac;
+  --ld-gray-04: #6d6e71;
+  --ld-gray-05: #414042;
+  --ld-gray-06: #2c2c2c;
+  --ld-black:   #191919;
+
+  --ld-blue:   #405bff;
+  --ld-cyan:   #3dd6f5;
+  --ld-lime:   #ddff46;
+  --ld-purple: #a34fde;
+  --ld-pink:   #ff35a2;
+  --ld-orange: #ff9d29;
+  --ld-blue-light: #7084ff;
+
+  --ld-gradient-purple-blue: linear-gradient(135deg, var(--ld-purple), var(--ld-blue));
+  --ld-gradient-cyan-blue: linear-gradient(135deg, var(--ld-cyan), var(--ld-blue));
+
+  --ld-bg:           var(--ld-black);
+  --ld-bg-elevated:  var(--ld-gray-06);
+  --ld-text-heading: var(--ld-white);
+  --ld-text-body:    var(--ld-gray-03);
+  --ld-text-subtle:  var(--ld-gray-04);
+  --ld-border:       var(--ld-gray-05);
+  --ld-link:         var(--ld-blue-light);
+  --ld-accent:       var(--ld-blue);
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
+  --color-ld-white:   var(--ld-white);
+  --color-ld-gray-01: var(--ld-gray-01);
+  --color-ld-gray-02: var(--ld-gray-02);
+  --color-ld-gray-03: var(--ld-gray-03);
+  --color-ld-gray-04: var(--ld-gray-04);
+  --color-ld-gray-05: var(--ld-gray-05);
+  --color-ld-gray-06: var(--ld-gray-06);
+  --color-ld-black:   var(--ld-black);
+  --color-ld-blue:    var(--ld-blue);
+  --color-ld-blue-light: var(--ld-blue-light);
+  --color-ld-cyan:    var(--ld-cyan);
+  --color-ld-lime:    var(--ld-lime);
+  --color-ld-purple:  var(--ld-purple);
+  --color-ld-pink:    var(--ld-pink);
+  --color-ld-orange:  var(--ld-orange);
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --font-display: var(--font-sora), system-ui, sans-serif;
+  --font-sans: var(--font-inter), system-ui, sans-serif;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--ld-bg);
+  color: var(--ld-text-body);
+  font-family: var(--font-sans);
+}
+
+h1, h2, h3, h4, h5 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  color: var(--ld-text-heading);
+}
+
+.ld-gradient-text {
+  background: var(--ld-gradient-purple-blue);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+::selection {
+  background: var(--ld-blue);
+  color: var(--ld-white);
 }
