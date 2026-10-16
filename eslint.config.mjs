@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // SAM build output for the OAuth proxy (git-ignored).
+    "oauth-proxy/.aws-sam/**",
   ]),
 ]);
 

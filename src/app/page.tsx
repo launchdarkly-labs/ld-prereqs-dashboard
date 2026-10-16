@@ -1,28 +1,30 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DetailPanel } from "@/components/DetailPanel";
 import { FlagTree, TreeDirection, collectAllPaths } from "@/components/FlagTree";
 import { SetupPanel, SetupResult } from "@/components/SetupPanel";
 import { FilterMode, StatsBar, Toolbar } from "@/components/Toolbar";
 import { assetPath } from "@/lib/asset-path";
+import { Credential, OAuthCredential } from "@/lib/credential";
 import { getAllFlags } from "@/lib/ld-api";
 import { LDClient } from "@/lib/ld-client";
+import { completeLogin, isOAuthCallback, oauthEnabled, revokeCredential } from "@/lib/oauth";
 import { buildGraph } from "@/lib/prereq-graph";
 import {
-  clearToken,
+  clearCredential,
+  loadCredential,
   loadFlagCache,
   loadSettings,
-  loadToken,
+  saveCredential,
   saveFlagCache,
   saveSettings,
-  saveToken,
 } from "@/lib/storage";
 import { FeatureFlag, InstanceKey, LDApiError, RateLimitError } from "@/lib/types";
 
 interface Session {
   instance: InstanceKey;
-  token: string;
+  credential: Credential;
   remember: boolean;
   projectKey: string;
   envKey: string;
@@ -38,6 +40,11 @@ export default function Home() {
   const [mounted, setMounted] = useState(false);
   const [session, setSession] = useState<Session | null>(null);
   const [editingSetup, setEditingSetup] = useState(false);
+  /** Result of a "Sign in with LaunchDarkly" redirect that still needs a project/env. */
+  const [signedIn, setSignedIn] = useState<{ credential: Credential; remember: boolean } | null>(
+    null,
+  );
+  const [signInError, setSignInError] = useState<string | null>(null);
 
   const [data, setData] = useState<FlagData | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -52,24 +59,53 @@ export default function Home() {
   const [expanded, setExpanded] = useState<Set<string> | null>(new Set());
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
 
+  /**
+   * Bumped whenever the credential is replaced or removed (sign-in, setup
+   * done, sign-out), so a token refresh still in flight from before can't
+   * write stale tokens back.
+   */
+  const authGenerationRef = useRef(0);
+  /** Strict Mode replays mount effects in dev; the boot (and its one-shot code exchange) must run once. */
+  const bootedRef = useRef(false);
+  /** Render-safe copy of the generation, for callbacks created during render. */
+  const [authGeneration, setAuthGeneration] = useState(0);
+  const bumpAuthGeneration = () => setAuthGeneration(++authGenerationRef.current);
+
+  /** Persist refreshed OAuth tokens and hand them to the next client. */
+  const credentialSaver = useCallback((generation: number) => {
+    return (credential: Credential, remember: boolean) => {
+      if (generation !== authGenerationRef.current || credential.kind !== "oauth") return;
+      saveCredential(credential, remember);
+      const sameLogin = (c?: Credential) =>
+        c?.kind === "oauth" && c.instance === credential.instance && c.clientId === credential.clientId;
+      setSession((prev) => (prev && sameLogin(prev.credential) ? { ...prev, credential } : prev));
+      setSignedIn((prev) => (prev && sameLogin(prev.credential) ? { ...prev, credential } : prev));
+    };
+  }, []);
+
   const refresh = useCallback(async (s: Session) => {
     setRefreshing(true);
     setError(null);
     setProgress(null);
     try {
-      const client = new LDClient({ instance: s.instance, token: s.token });
+      const save = credentialSaver(authGenerationRef.current);
+      const client = new LDClient({
+        instance: s.instance,
+        credential: s.credential,
+        onCredentialChange: (c) => save(c, s.remember),
+      });
       const flags = await getAllFlags(client, s.projectKey, s.envKey, (fetched, total) =>
         setProgress({ fetched, total }),
       );
       setData({ flags, fetchedAt: Date.now() });
       saveFlagCache(s.instance, s.projectKey, s.envKey, flags);
     } catch (e) {
-      setError(describeError(e));
+      setError(describeError(e, s.credential.kind));
     } finally {
       setRefreshing(false);
       setProgress(null);
     }
-  }, []);
+  }, [credentialSaver]);
 
   /** Show the cached sweep instantly; fetch only when there is no cache. */
   const openSession = useCallback(
@@ -89,12 +125,49 @@ export default function Home() {
   // the documented case where an effect must set state.
   useEffect(() => {
     /* eslint-disable react-hooks/set-state-in-effect */
-    const stored = loadToken();
+    if (bootedRef.current) return;
+    bootedRef.current = true;
     const settings = loadSettings();
-    if (stored && settings.projectKey && settings.envKey) {
+    // OAuth tokens belong to one instance: reopen saved settings only if they
+    // match it, otherwise resume at the project picker for that instance.
+    const resumeOAuth = (credential: OAuthCredential, remember: boolean) => {
+      if (settings.instance === credential.instance && settings.projectKey && settings.envKey) {
+        openSession({
+          instance: credential.instance,
+          credential,
+          remember,
+          projectKey: settings.projectKey,
+          envKey: settings.envKey,
+        });
+      } else {
+        setSignedIn({ credential, remember });
+      }
+    };
+
+    const url = new URL(window.location.href);
+    if (isOAuthCallback(url)) {
+      // Back from LaunchDarkly's consent screen: drop code/state from the URL first.
+      window.history.replaceState(null, "", url.pathname);
+      completeLogin(url)
+        .then(({ credential, remember }) => {
+          bumpAuthGeneration();
+          saveCredential(credential, remember);
+          resumeOAuth(credential, remember);
+        })
+        .catch((e) => setSignInError(e instanceof Error ? e.message : "Sign-in failed."))
+        .finally(() => setMounted(true));
+      return;
+    }
+
+    const stored = loadCredential();
+    if (stored?.credential.kind === "oauth") {
+      // A build with sign-in switched off (rollback) can't refresh or revoke these.
+      if (oauthEnabled(stored.credential.instance)) resumeOAuth(stored.credential, stored.remembered);
+      else clearCredential();
+    } else if (stored && settings.projectKey && settings.envKey) {
       openSession({
         instance: settings.instance,
-        token: stored.token,
+        credential: stored.credential,
         remember: stored.remembered,
         projectKey: settings.projectKey,
         envKey: settings.envKey,
@@ -105,10 +178,18 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- run once on mount
   }, []);
 
-  const client = useMemo(
-    () => (session ? new LDClient({ instance: session.instance, token: session.token }) : null),
-    [session],
-  );
+  const client = useMemo(() => {
+    if (!session) return null;
+    const save = credentialSaver(authGeneration);
+    // The saver reads the generation ref only when LDClient calls it after a
+    // token refresh (async, never during render).
+    // eslint-disable-next-line react-hooks/refs
+    return new LDClient({
+      instance: session.instance,
+      credential: session.credential,
+      onCredentialChange: (c) => save(c, session.remember),
+    });
+  }, [session, credentialSaver, authGeneration]);
 
   const graph = useMemo(
     () => (data && session ? buildGraph(data.flags, session.envKey) : null),
@@ -171,14 +252,20 @@ export default function Home() {
   }, [graph, direction, filter, search, tag]);
 
   const handleSetupDone = (result: SetupResult) => {
-    saveToken(result.token, result.remember);
+    bumpAuthGeneration();
+    saveCredential(result.credential, result.remember);
     saveSettings({ instance: result.instance, projectKey: result.projectKey, envKey: result.envKey });
     setEditingSetup(false);
+    setSignedIn(null);
+    setSignInError(null);
     openSession(result);
   };
 
   const signOut = () => {
-    clearToken();
+    bumpAuthGeneration();
+    if (session?.credential.kind === "oauth") void revokeCredential(session.credential);
+    clearCredential();
+    setSignedIn(null);
     setSession(null);
     setData(null);
     setEditingSetup(false);
@@ -191,8 +278,10 @@ export default function Home() {
       <main className="flex-1 px-6 pb-16">
         <SetupPanel
           initialInstance={session?.instance ?? loadSettings().instance}
-          initialToken={session?.token}
-          initialRemember={session?.remember}
+          initialCredential={session?.credential ?? signedIn?.credential}
+          initialRemember={session?.remember ?? signedIn?.remember}
+          initialError={signInError}
+          onCredentialChange={credentialSaver(authGeneration)}
           onDone={handleSetupDone}
         />
         {session && (
@@ -233,7 +322,11 @@ export default function Home() {
           <button
             onClick={signOut}
             className="rounded-md border border-ld-gray-05 px-3 py-1.5 text-ld-gray-03 transition-colors hover:text-ld-white"
-            title="Forget the API token on this device"
+            title={
+              session.credential.kind === "oauth"
+                ? "Sign out of LaunchDarkly on this device"
+                : "Forget the API token on this device"
+            }
           >
             Sign out
           </button>
@@ -345,13 +438,21 @@ function Spinner() {
   );
 }
 
-function describeError(e: unknown): string {
+function describeError(e: unknown, kind: Credential["kind"]): string {
   if (e instanceof RateLimitError) {
     return "LaunchDarkly rate limit reached and retries were exhausted. Wait a minute, then retry.";
   }
   if (e instanceof LDApiError) {
-    if (e.status === 401) return "The API token was rejected (401). Sign out and enter a valid token.";
-    if (e.status === 403) return "The token lacks permission to read this project's flags (403).";
+    if (e.status === 401) {
+      return kind === "token"
+        ? "The API token was rejected (401). Sign out and enter a valid token."
+        : "Your LaunchDarkly session has expired (401). Sign out and sign in again.";
+    }
+    if (e.status === 403) {
+      return kind === "token"
+        ? "The token lacks permission to read this project's flags (403)."
+        : "Your LaunchDarkly account lacks permission to read this project's flags (403).";
+    }
     if (e.status === 404) return "Project or environment not found (404) — it may have been deleted.";
     return `${e.message} (${e.status})`;
   }

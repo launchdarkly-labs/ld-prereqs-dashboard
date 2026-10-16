@@ -1,0 +1,97 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Stateless CORS pass-through for LaunchDarkly OAuth (token, revoke, DCR register)
+  used by ld-prerequisites-dashboard. Holds no secrets; never proxies /api/v2.
+
+Parameters:
+  AllowedOrigins:
+    Type: CommaDelimitedList
+    Default: https://launchdarkly-labs.github.io,http://localhost:3000
+    Description: Browser origins allowed to call the proxy (Function URL CORS and in-code 403 check).
+
+Resources:
+  OAuthProxyLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}
+      RetentionInDays: 14
+      Tags:
+        - { Key: project, Value: ld-prereqs-dashboard }
+        - { Key: owner, Value: mfasanek }
+
+  # Least-privilege execution role: write to its own log group, nothing else.
+  OAuthProxyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: write-logs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub ${OAuthProxyLogGroup.Arn}
+      Tags:
+        - { Key: project, Value: ld-prereqs-dashboard }
+        - { Key: owner, Value: mfasanek }
+
+  OAuthProxyFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Target: es2022
+        Minify: true
+        Sourcemap: false
+        EntryPoints:
+          - src/lambda.ts
+    Properties:
+      FunctionName: !Ref AWS::StackName
+      CodeUri: ./
+      Handler: lambda.handler
+      Runtime: nodejs24.x
+      Architectures: [arm64]
+      MemorySize: 128
+      Timeout: 10
+      ReservedConcurrentExecutions: 5
+      Role: !GetAtt OAuthProxyRole.Arn
+      LoggingConfig:
+        LogGroup: !Ref OAuthProxyLogGroup
+        LogFormat: JSON
+        ApplicationLogLevel: INFO
+        SystemLogLevel: WARN
+      Environment:
+        Variables:
+          ALLOWED_ORIGINS: !Join [",", !Ref AllowedOrigins]
+      # Public by design: browsers call it directly (OAuth public client + PKCE).
+      # The SAM transform generates both resource-policy statements Lambda now
+      # requires for AuthType NONE: lambda:InvokeFunctionUrl (FunctionUrlAuthType
+      # NONE) and lambda:InvokeFunction scoped with InvokedViaFunctionUrl=true.
+      FunctionUrlConfig:
+        AuthType: NONE
+        Cors:
+          AllowOrigins: !Ref AllowedOrigins
+          AllowMethods: [POST]
+          AllowHeaders: [content-type]
+          AllowCredentials: false
+          MaxAge: 300
+      Tags:
+        project: ld-prereqs-dashboard
+        owner: mfasanek
+
+Outputs:
+  ProxyUrl:
+    Description: Base URL for NEXT_PUBLIC_LD_OAUTH_PROXY_URL (POST {ProxyUrl}{instance}/token|revoke|register)
+    Value: !GetAtt OAuthProxyFunctionUrl.FunctionUrl
