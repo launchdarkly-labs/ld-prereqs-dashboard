@@ -1,14 +1,17 @@
+import { Credential, OAuthCredential } from "./credential";
 import { FeatureFlag, InstanceKey } from "./types";
 
 /**
  * Client-side persistence for a fully static app.
  *
- * The API token stays in sessionStorage by default (cleared when the tab
+ * The credential (pasted API token, or OAuth tokens from "Sign in with
+ * LaunchDarkly") stays in sessionStorage by default (cleared when the tab
  * closes); "remember on this device" moves it to localStorage. Everything
  * else (instance/project/env selection, flag cache) lives in localStorage.
  */
 
-const TOKEN_KEY = "ld-dash.token";
+const TOKEN_KEY = "ld-dash.token"; // raw string — format unchanged so existing sessions survive
+const OAUTH_KEY = "ld-dash.oauth";
 const SETTINGS_KEY = "ld-dash.settings";
 const CACHE_PREFIX = "ld-dash.cache";
 
@@ -43,25 +46,35 @@ function writeJson(storage: Storage, key: string, value: unknown): boolean {
   }
 }
 
-export function loadToken(): { token: string; remembered: boolean } | null {
+/** sessionStorage wins over localStorage; within each, an OAuth sign-in wins over a pasted token. */
+export function loadCredential(): { credential: Credential; remembered: boolean } | null {
   if (!isBrowser) return null;
-  const session = sessionStorage.getItem(TOKEN_KEY);
-  if (session) return { token: session, remembered: false };
-  const local = localStorage.getItem(TOKEN_KEY);
-  if (local) return { token: local, remembered: true };
+  for (const [storage, remembered] of [
+    [sessionStorage, false],
+    [localStorage, true],
+  ] as const) {
+    const oauth = readJson<OAuthCredential>(storage, OAUTH_KEY);
+    if (oauth?.kind === "oauth" && oauth.accessToken) return { credential: oauth, remembered };
+    const token = storage.getItem(TOKEN_KEY);
+    if (token) return { credential: { kind: "token", token }, remembered };
+  }
   return null;
 }
 
-export function saveToken(token: string, remember: boolean): void {
+export function saveCredential(credential: Credential, remember: boolean): void {
   if (!isBrowser) return;
-  clearToken();
-  (remember ? localStorage : sessionStorage).setItem(TOKEN_KEY, token);
+  clearCredential();
+  const storage = remember ? localStorage : sessionStorage;
+  if (credential.kind === "token") storage.setItem(TOKEN_KEY, credential.token);
+  else writeJson(storage, OAUTH_KEY, credential);
 }
 
-export function clearToken(): void {
+export function clearCredential(): void {
   if (!isBrowser) return;
-  sessionStorage.removeItem(TOKEN_KEY);
-  localStorage.removeItem(TOKEN_KEY);
+  for (const storage of [sessionStorage, localStorage]) {
+    storage.removeItem(TOKEN_KEY);
+    storage.removeItem(OAUTH_KEY);
+  }
 }
 
 export function loadSettings(): Settings {

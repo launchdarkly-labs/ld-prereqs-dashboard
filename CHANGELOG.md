@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Optional "Sign in with LaunchDarkly" (OAuth authorization code + PKCE, public client via Dynamic Client Registration) alongside the pasted API token. Hidden unless the build sets `NEXT_PUBLIC_LD_OAUTH_PROXY_URL` and a client id for the instance. Commercial instance only for now: LaunchDarkly has not enabled DCR on EU.
+- `oauth-proxy/`: a stateless AWS Lambda (SAM) that forwards only LaunchDarkly's OAuth token, revoke and register endpoints, which send no CORS headers.
+- `scripts/register-oauth-client.mjs` to register the OAuth client per instance and redirect URI.
+
+### Changed
+
+- The API client now carries a credential (API token or OAuth tokens). OAuth access tokens refresh automatically. Pasted API tokens are sent exactly as before, and existing saved tokens keep working.
+
 ## [0.1.0] - 2026-07-27
 
 ### Added

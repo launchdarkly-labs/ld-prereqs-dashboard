@@ -1,10 +1,17 @@
+import { Credential, OAuthCredential, authorizationHeader } from "./credential";
+import { refreshCredential } from "./oauth";
 import { RateLimitedFetcher } from "./rate-limiter";
 import { INSTANCES, InstanceKey, LDApiError, Paginated } from "./types";
 
 export interface LDClientConfig {
   instance: InstanceKey;
-  token: string;
+  credential: Credential;
   fetcher?: RateLimitedFetcher;
+  /** Called after an OAuth refresh so the caller can persist the new tokens. */
+  onCredentialChange?: (credential: Credential) => void;
+  /** Injectable for tests; defaults to a refresh through the OAuth proxy. */
+  refresher?: (credential: OAuthCredential) => Promise<OAuthCredential>;
+  now?: () => number;
 }
 
 /**
@@ -13,6 +20,9 @@ export interface LDClientConfig {
  * into a rate limit.
  */
 export const sharedFetcher = new RateLimitedFetcher();
+
+/** Refresh OAuth access tokens this long before they expire. */
+const REFRESH_SKEW_MS = 60_000;
 
 interface RequestOptions {
   params?: Record<string, string | number | undefined>;
@@ -23,13 +33,19 @@ interface RequestOptions {
 /** Thin typed wrapper over the LD REST API: auth, base URL by instance, pagination. */
 export class LDClient {
   readonly instance: InstanceKey;
-  private readonly token: string;
+  private credential: Credential;
   private readonly fetcher: RateLimitedFetcher;
+  private readonly onCredentialChange?: (credential: Credential) => void;
+  private readonly refresher: (credential: OAuthCredential) => Promise<OAuthCredential>;
+  private readonly now: () => number;
 
   constructor(cfg: LDClientConfig) {
     this.instance = cfg.instance;
-    this.token = cfg.token.trim();
+    this.credential = cfg.credential;
     this.fetcher = cfg.fetcher ?? sharedFetcher;
+    this.onCredentialChange = cfg.onCredentialChange;
+    this.refresher = cfg.refresher ?? refreshCredential;
+    this.now = cfg.now ?? (() => Date.now());
   }
 
   get apiBase(): string {
@@ -42,10 +58,13 @@ export class LDClient {
       if (v !== undefined) url.searchParams.set(k, String(v));
     }
 
-    const headers: Record<string, string> = { Authorization: this.token };
-    if (opts.beta) headers["LD-API-Version"] = "beta";
+    if (this.oauthExpiresSoon()) await this.tryRefresh();
+    let res = await this.send(url, opts);
+    // An OAuth access token can be revoked or expire early: refresh once and retry.
+    if (res.status === 401 && this.canRefresh() && (await this.tryRefresh())) {
+      res = await this.send(url, opts);
+    }
 
-    const res = await this.fetcher.fetch(url.toString(), { headers });
     if (!res.ok) {
       let message = `LaunchDarkly API request failed (${res.status})`;
       try {
@@ -79,5 +98,37 @@ export class LDClient {
       // already carry every query param, including any beta flags' params.
       page = await this.get<Paginated<T>>(next, { beta: opts.beta });
     }
+  }
+
+  private send(url: URL, opts: RequestOptions): Promise<Response> {
+    const headers: Record<string, string> = { Authorization: authorizationHeader(this.credential) };
+    if (opts.beta) headers["LD-API-Version"] = "beta";
+    return this.fetcher.fetch(url.toString(), { headers });
+  }
+
+  private canRefresh(): boolean {
+    return this.credential.kind === "oauth" && !!this.credential.refreshToken;
+  }
+
+  private oauthExpiresSoon(): boolean {
+    const c = this.credential;
+    return (
+      c.kind === "oauth" &&
+      !!c.refreshToken &&
+      c.expiresAt !== undefined &&
+      c.expiresAt - this.now() < REFRESH_SKEW_MS
+    );
+  }
+
+  /** Returns false (leaving the current token in place) if the refresh fails. */
+  private async tryRefresh(): Promise<boolean> {
+    if (this.credential.kind !== "oauth") return false;
+    try {
+      this.credential = await this.refresher(this.credential);
+    } catch {
+      return false;
+    }
+    this.onCredentialChange?.(this.credential);
+    return true;
   }
 }

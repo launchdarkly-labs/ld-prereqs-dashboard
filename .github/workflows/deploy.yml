@@ -30,6 +30,11 @@ jobs:
         env:
           # Serve from https://<owner>.github.io/<repo>/
           NEXT_PUBLIC_BASE_PATH: /${{ github.event.repository.name }}
+          # Optional "Sign in with LaunchDarkly". Repo variables (not secrets —
+          # public client ids). Unset = the option is hidden; token-only, as before.
+          NEXT_PUBLIC_LD_OAUTH_PROXY_URL: ${{ vars.NEXT_PUBLIC_LD_OAUTH_PROXY_URL }}
+          NEXT_PUBLIC_LD_OAUTH_CLIENT_ID_COMMERCIAL: ${{ vars.NEXT_PUBLIC_LD_OAUTH_CLIENT_ID_COMMERCIAL }}
+          NEXT_PUBLIC_LD_OAUTH_CLIENT_ID_EU: ${{ vars.NEXT_PUBLIC_LD_OAUTH_CLIENT_ID_EU }}
       - run: touch out/.nojekyll
       - uses: actions/upload-pages-artifact@v5
         with:
