@@ -94,6 +94,11 @@ export function authorizeEndpoint(instance: InstanceKey): string {
 }
 
 function proxyEndpoint(instance: InstanceKey, op: "token" | "revoke", config: OAuthConfig): string {
+  // Never fall back to a relative URL: after a rollback (proxy var removed) a
+  // saved credential must not be POSTed to the dashboard's own host.
+  if (!/^https?:\/\//.test(config.proxyUrl)) {
+    throw new OAuthError("Sign-in is not configured in this build; sign in again or use an API token.");
+  }
   return `${config.proxyUrl.replace(/\/+$/, "")}/${instance}/${op}`;
 }
 
@@ -179,9 +184,11 @@ export async function completeLogin(
 }
 
 /**
- * Keyed by the refresh token being spent, and kept: parallel requests share
- * one refresh, and a client still holding an already-rotated refresh token
- * gets the same result instead of replaying a spent token.
+ * Keyed by the refresh token being spent. Parallel requests share one
+ * refresh. When LD rotates the refresh token, the result stays cached so a
+ * client still holding the spent token gets it instead of replaying the spent
+ * token. When it doesn't rotate, the entry is evicted, or the next refresh
+ * would return the same (soon expired) access token forever.
  */
 const refreshes = new Map<string, Promise<OAuthCredential>>();
 
@@ -203,6 +210,7 @@ export function refreshCredential(
       const next = toCredential(cred.instance, cred.clientId, tokens);
       // LD may not rotate refresh tokens: keep the old one if none came back.
       next.refreshToken ??= refreshToken;
+      if (next.refreshToken === refreshToken) refreshes.delete(refreshToken);
       return next;
     });
     p.catch(() => refreshes.delete(refreshToken));

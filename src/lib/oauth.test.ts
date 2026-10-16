@@ -8,6 +8,7 @@ import {
   oauthEnabled,
   pkceChallenge,
   refreshCredential,
+  revokeCredential,
 } from "./oauth";
 
 const config: OAuthConfig = {
@@ -110,5 +111,38 @@ describe("oauth", () => {
     expect(calls).toHaveLength(1);
     expect(a).toBe(b);
     expect(a).toMatchObject({ accessToken: "a2", refreshToken: "r-shared" });
+  });
+
+  it("refreshes again on the next cycle when LD does not rotate the refresh token", async () => {
+    const cred: OAuthCredential = {
+      kind: "oauth",
+      instance: "eu",
+      clientId: "client-eu",
+      accessToken: "a1",
+      refreshToken: "r-stable",
+    };
+    let n = 0;
+    const fetchImpl = (async () =>
+      new Response(JSON.stringify({ access_token: `a${++n + 1}`, refresh_token: "r-stable" }))) as typeof fetch;
+    const first = await refreshCredential(cred, config, fetchImpl);
+    const second = await refreshCredential(first, config, fetchImpl);
+    expect(n).toBe(2);
+    expect(first.accessToken).toBe("a2");
+    expect(second.accessToken).toBe("a3");
+  });
+
+  it("never sends tokens to a relative URL when the proxy is not configured", async () => {
+    const cred: OAuthCredential = {
+      kind: "oauth",
+      instance: "commercial",
+      clientId: "c",
+      accessToken: "a1",
+      refreshToken: "r-rollback",
+    };
+    const unconfigured: OAuthConfig = { proxyUrl: "", clientIds: {} };
+    const { calls, fetchImpl } = tokenFetch({ access_token: "a2" });
+    await expect(refreshCredential(cred, unconfigured, fetchImpl)).rejects.toThrow(/not configured/);
+    await revokeCredential(cred, unconfigured, fetchImpl);
+    expect(calls).toHaveLength(0);
   });
 });

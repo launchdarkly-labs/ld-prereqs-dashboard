@@ -150,6 +150,18 @@ describe("passthrough", () => {
     });
     expect((await handle(req(), deps(timingOut))).status).toBe(504);
   });
+
+  it("maps a failure while reading the upstream body to 502", async () => {
+    const brokenBody = vi.fn<typeof fetch>(async () => {
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.error(new TypeError("terminated"));
+        },
+      });
+      return new Response(stream, { status: 200, headers: { "content-type": "application/json" } });
+    });
+    expect((await handle(req(), deps(brokenBody))).status).toBe(502);
+  });
 });
 
 describe("headers and logging", () => {

@@ -1,15 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DetailPanel } from "@/components/DetailPanel";
 import { FlagTree, TreeDirection, collectAllPaths } from "@/components/FlagTree";
 import { SetupPanel, SetupResult } from "@/components/SetupPanel";
 import { FilterMode, StatsBar, Toolbar } from "@/components/Toolbar";
 import { assetPath } from "@/lib/asset-path";
-import { Credential } from "@/lib/credential";
+import { Credential, OAuthCredential } from "@/lib/credential";
 import { getAllFlags } from "@/lib/ld-api";
 import { LDClient } from "@/lib/ld-client";
-import { completeLogin, isOAuthCallback, revokeCredential } from "@/lib/oauth";
+import { completeLogin, isOAuthCallback, oauthEnabled, revokeCredential } from "@/lib/oauth";
 import { buildGraph } from "@/lib/prereq-graph";
 import {
   clearCredential,
@@ -59,24 +59,38 @@ export default function Home() {
   const [expanded, setExpanded] = useState<Set<string> | null>(new Set());
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
 
+  /**
+   * Bumped whenever the credential is replaced or removed (sign-in, setup
+   * done, sign-out), so a token refresh still in flight from before can't
+   * write stale tokens back.
+   */
+  const authGenerationRef = useRef(0);
+  /** Render-safe copy of the generation, for callbacks created during render. */
+  const [authGeneration, setAuthGeneration] = useState(0);
+  const bumpAuthGeneration = () => setAuthGeneration(++authGenerationRef.current);
+
   /** Persist refreshed OAuth tokens and hand them to the next client. */
-  const credentialSaver = useCallback(
-    (remember: boolean) => (credential: Credential) => {
+  const credentialSaver = useCallback((generation: number) => {
+    return (credential: Credential, remember: boolean) => {
+      if (generation !== authGenerationRef.current || credential.kind !== "oauth") return;
       saveCredential(credential, remember);
-      setSession((prev) => (prev ? { ...prev, credential } : prev));
-    },
-    [],
-  );
+      const sameLogin = (c?: Credential) =>
+        c?.kind === "oauth" && c.instance === credential.instance && c.clientId === credential.clientId;
+      setSession((prev) => (prev && sameLogin(prev.credential) ? { ...prev, credential } : prev));
+      setSignedIn((prev) => (prev && sameLogin(prev.credential) ? { ...prev, credential } : prev));
+    };
+  }, []);
 
   const refresh = useCallback(async (s: Session) => {
     setRefreshing(true);
     setError(null);
     setProgress(null);
     try {
+      const save = credentialSaver(authGenerationRef.current);
       const client = new LDClient({
         instance: s.instance,
         credential: s.credential,
-        onCredentialChange: credentialSaver(s.remember),
+        onCredentialChange: (c) => save(c, s.remember),
       });
       const flags = await getAllFlags(client, s.projectKey, s.envKey, (fetched, total) =>
         setProgress({ fetched, total }),
@@ -110,24 +124,31 @@ export default function Home() {
   useEffect(() => {
     /* eslint-disable react-hooks/set-state-in-effect */
     const settings = loadSettings();
+    // OAuth tokens belong to one instance: reopen saved settings only if they
+    // match it, otherwise resume at the project picker for that instance.
+    const resumeOAuth = (credential: OAuthCredential, remember: boolean) => {
+      if (settings.instance === credential.instance && settings.projectKey && settings.envKey) {
+        openSession({
+          instance: credential.instance,
+          credential,
+          remember,
+          projectKey: settings.projectKey,
+          envKey: settings.envKey,
+        });
+      } else {
+        setSignedIn({ credential, remember });
+      }
+    };
+
     const url = new URL(window.location.href);
     if (isOAuthCallback(url)) {
       // Back from LaunchDarkly's consent screen: drop code/state from the URL first.
       window.history.replaceState(null, "", url.pathname);
       completeLogin(url)
         .then(({ credential, remember }) => {
+          bumpAuthGeneration();
           saveCredential(credential, remember);
-          if (settings.instance === credential.instance && settings.projectKey && settings.envKey) {
-            openSession({
-              instance: credential.instance,
-              credential,
-              remember,
-              projectKey: settings.projectKey,
-              envKey: settings.envKey,
-            });
-          } else {
-            setSignedIn({ credential, remember });
-          }
+          resumeOAuth(credential, remember);
         })
         .catch((e) => setSignInError(e instanceof Error ? e.message : "Sign-in failed."))
         .finally(() => setMounted(true));
@@ -135,7 +156,11 @@ export default function Home() {
     }
 
     const stored = loadCredential();
-    if (stored && settings.projectKey && settings.envKey) {
+    if (stored?.credential.kind === "oauth") {
+      // A build with sign-in switched off (rollback) can't refresh or revoke these.
+      if (oauthEnabled(stored.credential.instance)) resumeOAuth(stored.credential, stored.remembered);
+      else clearCredential();
+    } else if (stored && settings.projectKey && settings.envKey) {
       openSession({
         instance: settings.instance,
         credential: stored.credential,
@@ -149,17 +174,18 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- run once on mount
   }, []);
 
-  const client = useMemo(
-    () =>
-      session
-        ? new LDClient({
-            instance: session.instance,
-            credential: session.credential,
-            onCredentialChange: credentialSaver(session.remember),
-          })
-        : null,
-    [session, credentialSaver],
-  );
+  const client = useMemo(() => {
+    if (!session) return null;
+    const save = credentialSaver(authGeneration);
+    // The saver reads the generation ref only when LDClient calls it after a
+    // token refresh (async, never during render).
+    // eslint-disable-next-line react-hooks/refs
+    return new LDClient({
+      instance: session.instance,
+      credential: session.credential,
+      onCredentialChange: (c) => save(c, session.remember),
+    });
+  }, [session, credentialSaver, authGeneration]);
 
   const graph = useMemo(
     () => (data && session ? buildGraph(data.flags, session.envKey) : null),
@@ -222,6 +248,7 @@ export default function Home() {
   }, [graph, direction, filter, search, tag]);
 
   const handleSetupDone = (result: SetupResult) => {
+    bumpAuthGeneration();
     saveCredential(result.credential, result.remember);
     saveSettings({ instance: result.instance, projectKey: result.projectKey, envKey: result.envKey });
     setEditingSetup(false);
@@ -231,8 +258,10 @@ export default function Home() {
   };
 
   const signOut = () => {
+    bumpAuthGeneration();
     if (session?.credential.kind === "oauth") void revokeCredential(session.credential);
     clearCredential();
+    setSignedIn(null);
     setSession(null);
     setData(null);
     setEditingSetup(false);
@@ -248,6 +277,7 @@ export default function Home() {
           initialCredential={session?.credential ?? signedIn?.credential}
           initialRemember={session?.remember ?? signedIn?.remember}
           initialError={signInError}
+          onCredentialChange={credentialSaver(authGeneration)}
           onDone={handleSetupDone}
         />
         {session && (

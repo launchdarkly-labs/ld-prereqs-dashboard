@@ -116,20 +116,23 @@ export async function handle(req: ProxyRequest, deps: ProxyDeps): Promise<ProxyR
   }
 
   let upstream: Response;
+  let body: string;
+  const signal = AbortSignal.timeout(UPSTREAM_TIMEOUT_MS);
   try {
     upstream = await deps.fetch(`https://${UPSTREAM_HOSTS[instance]}${routeDef.upstreamPath}`, {
       method: "POST",
       headers: { "content-type": req.contentType as string, accept: "application/json" },
       body: req.body,
       redirect: "manual",
-      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+      signal,
     });
+    // fetch resolves on headers; the body can still fail or time out while streaming.
+    body = await upstream.text();
   } catch (err) {
-    const timedOut = err instanceof Error && err.name === "TimeoutError";
+    const timedOut = signal.aborted || (err instanceof Error && err.name === "TimeoutError");
     return finish(error(timedOut ? 504 : 502, timedOut ? "upstream_timeout" : "upstream_unreachable"));
   }
 
-  const body = await upstream.text();
   const headers: Record<string, string> = { "cache-control": "no-store" };
   const upstreamType = upstream.headers.get("content-type");
   if (upstreamType) headers["content-type"] = upstreamType;

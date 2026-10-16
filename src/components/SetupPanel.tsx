@@ -22,24 +22,32 @@ interface SetupPanelProps {
   initialRemember?: boolean;
   /** Shown on first render, e.g. a failed "Sign in with LaunchDarkly" redirect. */
   initialError?: string | null;
+  /** Refreshed OAuth tokens, to persist right away (a refresh may rotate the refresh token). */
+  onCredentialChange?: (credential: Credential, remember: boolean) => void;
   onDone: (result: SetupResult) => void;
 }
 
 type AuthMode = "token" | "oauth";
+
+// The OAuth option only exists in builds configured with a proxy + client id;
+// otherwise this panel is exactly the pasted-token form.
+const OAUTH_AVAILABLE = (Object.keys(INSTANCES) as InstanceKey[]).some((k) => oauthEnabled(k));
 
 export function SetupPanel({
   initialInstance,
   initialCredential,
   initialRemember,
   initialError,
+  onCredentialChange,
   onDone,
 }: SetupPanelProps) {
   const [instance, setInstance] = useState<InstanceKey>(
     initialCredential?.kind === "oauth" ? initialCredential.instance : initialInstance,
   );
-  // initialError only ever comes from a failed sign-in redirect, so reopen that tab.
+  // initialError only ever comes from a failed sign-in redirect, so reopen that
+  // tab — but only if this build can sign in at all (e.g. not after a rollback).
   const [mode, setMode] = useState<AuthMode>(
-    initialCredential?.kind === "oauth" || initialError ? "oauth" : "token",
+    OAUTH_AVAILABLE && (initialCredential?.kind === "oauth" || initialError) ? "oauth" : "token",
   );
   const [token, setToken] = useState(initialCredential?.kind === "token" ? initialCredential.token : "");
   const [oauthCred, setOauthCred] = useState<OAuthCredential | null>(
@@ -49,16 +57,18 @@ export function SetupPanel({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(initialError ?? null);
 
-  // The OAuth option only exists in builds configured with a proxy + client id;
-  // otherwise this panel is exactly the pasted-token form.
-  const oauthAvailable = (Object.keys(INSTANCES) as InstanceKey[]).some((k) => oauthEnabled(k));
   const credential: Credential | null =
     mode === "oauth" ? oauthCred : token.trim() ? { kind: "token", token: token.trim() } : null;
+  // OAuth tokens are bound to the instance they were issued by, whatever the selector says.
+  const instanceFor = (cred: Credential) => (cred.kind === "oauth" ? cred.instance : instance);
   const makeClient = (cred: Credential) =>
     new LDClient({
-      instance,
+      instance: instanceFor(cred),
       credential: cred,
-      onCredentialChange: (c) => c.kind === "oauth" && setOauthCred(c),
+      onCredentialChange: (c) => {
+        if (c.kind === "oauth") setOauthCred(c);
+        onCredentialChange?.(c, remember);
+      },
     });
 
   const [projects, setProjects] = useState<Project[] | null>(null);
@@ -150,7 +160,7 @@ export function SetupPanel({
           </select>
         </label>
 
-        {oauthAvailable && projects === null && (
+        {OAUTH_AVAILABLE && projects === null && (
           <div className="flex rounded-md border border-ld-gray-05 p-0.5 text-sm" role="tablist">
             {(
               [
@@ -165,6 +175,7 @@ export function SetupPanel({
                 onClick={() => {
                   setMode(m);
                   setError(null);
+                  if (m === "oauth" && oauthCred) setInstance(oauthCred.instance);
                 }}
                 className={`flex-1 rounded px-3 py-1.5 transition-colors ${
                   mode === m ? "bg-ld-gray-05 text-ld-white" : "text-ld-gray-03 hover:text-ld-white"
@@ -285,7 +296,8 @@ export function SetupPanel({
             <div className="flex gap-2">
               <button
                 onClick={() =>
-                  credential && onDone({ instance, credential, remember, projectKey, envKey })
+                  credential &&
+                  onDone({ instance: instanceFor(credential), credential, remember, projectKey, envKey })
                 }
                 disabled={busy || !credential || !projectKey || !envKey}
                 className="flex-1 rounded-md bg-ld-blue px-4 py-2 text-sm font-medium text-ld-white transition-colors hover:bg-ld-blue-light disabled:cursor-not-allowed disabled:opacity-50"
