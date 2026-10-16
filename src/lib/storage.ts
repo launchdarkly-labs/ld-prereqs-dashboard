@@ -69,6 +69,18 @@ export function saveCredential(credential: Credential, remember: boolean): void 
   else writeJson(storage, OAUTH_KEY, credential);
 }
 
+/** The stored OAuth credential, for cross-tab refresh coordination (src/lib/oauth.ts). */
+export const oauthCredentialStore = {
+  read(): OAuthCredential | null {
+    const stored = loadCredential();
+    return stored?.credential.kind === "oauth" ? stored.credential : null;
+  },
+  write(credential: OAuthCredential): void {
+    const stored = loadCredential();
+    if (stored) saveCredential(credential, stored.remembered);
+  },
+};
+
 export function clearCredential(): void {
   if (!isBrowser) return;
   for (const storage of [sessionStorage, localStorage]) {

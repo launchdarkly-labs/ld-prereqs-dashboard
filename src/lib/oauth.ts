@@ -183,40 +183,94 @@ export async function completeLogin(
   };
 }
 
+/** Refresh access tokens this long before they expire. */
+export const REFRESH_SKEW_MS = 60_000;
+
+export function expiresSoon(cred: OAuthCredential, now = Date.now()): boolean {
+  return cred.expiresAt !== undefined && cred.expiresAt - now < REFRESH_SKEW_MS;
+}
+
+function sameLogin(a: OAuthCredential, b: OAuthCredential): boolean {
+  return a.instance === b.instance && a.clientId === b.clientId;
+}
+
+/** Refreshes in flight, keyed by the refresh token being spent: parallel callers share one. */
+const inFlight = new Map<string, Promise<OAuthCredential>>();
 /**
- * Keyed by the refresh token being spent. Parallel requests share one
- * refresh. When LD rotates the refresh token, the result stays cached so a
- * client still holding the spent token gets it instead of replaying the spent
- * token. When it doesn't rotate, the entry is evicted, or the next refresh
- * would return the same (soon expired) access token forever.
+ * Spent (rotated-away) refresh token → newest credential of its rotation
+ * chain. A client still holding an old credential gets the latest tokens
+ * instead of replaying a spent refresh token or publishing a stale result.
  */
-const refreshes = new Map<string, Promise<OAuthCredential>>();
+const successors = new Map<string, OAuthCredential>();
 
 export function refreshCredential(
   cred: OAuthCredential,
   config: OAuthConfig = buildConfig,
   fetchImpl: typeof fetch = fetch,
 ): Promise<OAuthCredential> {
-  const refreshToken = cred.refreshToken;
+  const newer = cred.refreshToken ? successors.get(cred.refreshToken) : undefined;
+  if (newer && !expiresSoon(newer)) return Promise.resolve(newer);
+  const base = newer ?? cred;
+  const refreshToken = base.refreshToken;
   if (!refreshToken) return Promise.reject(new OAuthError("No refresh token; sign in again."));
-  let p = refreshes.get(refreshToken);
+
+  let p = inFlight.get(refreshToken);
   if (!p) {
     p = postToken(
-      cred.instance,
-      { grant_type: "refresh_token", client_id: cred.clientId, refresh_token: refreshToken },
+      base.instance,
+      { grant_type: "refresh_token", client_id: base.clientId, refresh_token: refreshToken },
       config,
       fetchImpl,
-    ).then((tokens) => {
-      const next = toCredential(cred.instance, cred.clientId, tokens);
-      // LD may not rotate refresh tokens: keep the old one if none came back.
-      next.refreshToken ??= refreshToken;
-      if (next.refreshToken === refreshToken) refreshes.delete(refreshToken);
-      return next;
-    });
-    p.catch(() => refreshes.delete(refreshToken));
-    refreshes.set(refreshToken, p);
+    )
+      .then((tokens) => {
+        const next = toCredential(base.instance, base.clientId, tokens);
+        // LD may not rotate refresh tokens: keep the old one if none came back.
+        next.refreshToken ??= refreshToken;
+        if (next.refreshToken !== refreshToken) {
+          for (const [spent, c] of successors) if (c.refreshToken === refreshToken) successors.set(spent, next);
+          successors.set(refreshToken, next);
+        }
+        return next;
+      })
+      .finally(() => inFlight.delete(refreshToken));
+    inFlight.set(refreshToken, p);
   }
   return p;
+}
+
+/** Where the page keeps the current credential (web storage, shared by same-origin tabs). */
+export interface CredentialStore {
+  read(): OAuthCredential | null;
+  write(credential: OAuthCredential): void;
+}
+
+const REFRESH_LOCK = "ld-dash.oauth.refresh";
+
+/**
+ * Refresh coordinated across tabs. Remembered credentials live in
+ * localStorage, so another tab may already have rotated this login's refresh
+ * token. Under a Web Lock, re-read the stored credential: adopt it if another
+ * tab already refreshed, otherwise refresh from it and persist before
+ * releasing the lock, so the next tab reads the new tokens. It only writes
+ * over the credential it refreshed from, so it never resurrects a sign-out.
+ */
+export async function refreshAcrossTabs(
+  cred: OAuthCredential,
+  store: CredentialStore,
+  config: OAuthConfig = buildConfig,
+  fetchImpl: typeof fetch = fetch,
+): Promise<OAuthCredential> {
+  const run = async () => {
+    const stored = store.read();
+    const current = stored && sameLogin(stored, cred) ? stored : null;
+    if (current && current.accessToken !== cred.accessToken && !expiresSoon(current)) return current;
+    const base = current ?? cred;
+    const next = await refreshCredential(base, config, fetchImpl);
+    if (current && store.read()?.refreshToken === base.refreshToken) store.write(next);
+    return next;
+  };
+  const locks = typeof navigator !== "undefined" ? navigator.locks : undefined;
+  return locks ? locks.request(REFRESH_LOCK, run) : run();
 }
 
 /** Best-effort revocation of both tokens; sign-out proceeds regardless. */

@@ -172,12 +172,14 @@ export function SetupPanel({
                 key={m}
                 role="tab"
                 aria-selected={mode === m}
+                // An in-flight request belongs to the current mode's credential.
+                disabled={busy}
                 onClick={() => {
                   setMode(m);
                   setError(null);
                   if (m === "oauth" && oauthCred) setInstance(oauthCred.instance);
                 }}
-                className={`flex-1 rounded px-3 py-1.5 transition-colors ${
+                className={`flex-1 rounded px-3 py-1.5 transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
                   mode === m ? "bg-ld-gray-05 text-ld-white" : "text-ld-gray-03 hover:text-ld-white"
                 }`}
               >

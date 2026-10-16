@@ -65,6 +65,8 @@ export default function Home() {
    * write stale tokens back.
    */
   const authGenerationRef = useRef(0);
+  /** Strict Mode replays mount effects in dev; the boot (and its one-shot code exchange) must run once. */
+  const bootedRef = useRef(false);
   /** Render-safe copy of the generation, for callbacks created during render. */
   const [authGeneration, setAuthGeneration] = useState(0);
   const bumpAuthGeneration = () => setAuthGeneration(++authGenerationRef.current);
@@ -123,6 +125,8 @@ export default function Home() {
   // the documented case where an effect must set state.
   useEffect(() => {
     /* eslint-disable react-hooks/set-state-in-effect */
+    if (bootedRef.current) return;
+    bootedRef.current = true;
     const settings = loadSettings();
     // OAuth tokens belong to one instance: reopen saved settings only if they
     // match it, otherwise resume at the project picker for that instance.

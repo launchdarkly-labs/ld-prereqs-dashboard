@@ -1,6 +1,7 @@
 import { Credential, OAuthCredential, authorizationHeader } from "./credential";
-import { refreshCredential } from "./oauth";
+import { expiresSoon, refreshAcrossTabs } from "./oauth";
 import { RateLimitedFetcher } from "./rate-limiter";
+import { oauthCredentialStore } from "./storage";
 import { INSTANCES, InstanceKey, LDApiError, Paginated } from "./types";
 
 export interface LDClientConfig {
@@ -9,7 +10,7 @@ export interface LDClientConfig {
   fetcher?: RateLimitedFetcher;
   /** Called after an OAuth refresh so the caller can persist the new tokens. */
   onCredentialChange?: (credential: Credential) => void;
-  /** Injectable for tests; defaults to a refresh through the OAuth proxy. */
+  /** Injectable for tests; defaults to a cross-tab-coordinated refresh through the OAuth proxy. */
   refresher?: (credential: OAuthCredential) => Promise<OAuthCredential>;
   now?: () => number;
 }
@@ -20,9 +21,6 @@ export interface LDClientConfig {
  * into a rate limit.
  */
 export const sharedFetcher = new RateLimitedFetcher();
-
-/** Refresh OAuth access tokens this long before they expire. */
-const REFRESH_SKEW_MS = 60_000;
 
 interface RequestOptions {
   params?: Record<string, string | number | undefined>;
@@ -44,7 +42,7 @@ export class LDClient {
     this.credential = cfg.credential;
     this.fetcher = cfg.fetcher ?? sharedFetcher;
     this.onCredentialChange = cfg.onCredentialChange;
-    this.refresher = cfg.refresher ?? refreshCredential;
+    this.refresher = cfg.refresher ?? ((c) => refreshAcrossTabs(c, oauthCredentialStore));
     this.now = cfg.now ?? (() => Date.now());
   }
 
@@ -112,12 +110,7 @@ export class LDClient {
 
   private oauthExpiresSoon(): boolean {
     const c = this.credential;
-    return (
-      c.kind === "oauth" &&
-      !!c.refreshToken &&
-      c.expiresAt !== undefined &&
-      c.expiresAt - this.now() < REFRESH_SKEW_MS
-    );
+    return c.kind === "oauth" && !!c.refreshToken && expiresSoon(c, this.now());
   }
 
   /** Returns false (leaving the current token in place) if the refresh fails. */
